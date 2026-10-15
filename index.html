@@ -45,6 +45,7 @@ textarea{width:min(320px,100%);height:34px;resize:vertical}
   <button id="exj">匯出 JSON</button>
   <label style="cursor:pointer;border:1px solid var(--ln);border-radius:6px;padding:4px 8px;color:var(--tx)">匯入 JSON<input type="file" id="imp" accept=".json,application/json" hidden></label>
   <button id="mp3" class="p">匯出 MP3</button>
+  <button class="p" onclick="document.getElementById('aud').click()">🎧 音訊轉音符</button>
   <span id="st" style="color:var(--mu);font-size:12px"></span>
 </div>
 <div class="bar">
@@ -80,6 +81,11 @@ textarea{width:min(320px,100%);height:34px;resize:vertical}
   時值：預設 1 拍（4 格）；<b>/</b> 減半（5/ = 半拍，5// = 四分之一拍）；<b>*</b> 附點（5* = 1.5 拍）；單獨的 <b>-</b> 把前一個音延長 1 拍，<b>-/</b> 延長半拍。<b>|</b> 為小節線，可省略。每個符號要用空格隔開，音域限 C3–C6。<br>
   歌詞只有羅馬字（ka、shi）和平假名、片假名（清音）會發出對應母音；漢字會以 a 發音。
 </details>
+<div class="bar">
+  <label style="cursor:pointer;border:1px solid var(--ln);border-radius:6px;padding:4px 8px;color:var(--tx)">🎧 音訊轉音符（MP3 / WAV / M4A）<input type="file" id="aud" accept="audio/*,.mp3" hidden></label>
+  <label>量化 <select id="aq"><option value="1">16 分音符</option><option value="2" selected>8 分音符</option><option value="4">4 分音符</option></select></label>
+  <span style="color:var(--mu);font-size:12px">節拍以上方 BPM 欄為準，請先設成原曲速度；僅適用單人清唱或單旋律，只辨識音高與節奏，歌詞預設為 a。</span>
+</div>
 <div id="roll"><div id="keys"></div><div id="grid"><div id="ph"></div></div></div>
 <p class="hint">操作：點空白處新增音符｜拖曳音符移動（上下改音高，左右改時間）｜拖右側深色邊緣調長度｜選取後在「歌詞」欄改發音｜雙擊或右鍵刪除（或按 Delete）｜點左側琴鍵試聽。歌詞可用羅馬字（ka、shi、tsu）或平假名／片假名（清音）。</p>
 
@@ -353,6 +359,51 @@ $('jpRev').onclick=()=>{
   }
   $('jp').value=out.join(' ');$('jpLy').value=ly.join(' ');
   msg(ns.length?'已轉換 '+(ns.length-skip)+' 個音符'+(skip?'，略過 '+skip+' 個重疊音符（簡譜僅支援單旋律）':''):'目前沒有音符');
+};
+/* ---------- 音訊 → 音符（YIN 音高偵測，僅適用單旋律） ---------- */
+async function audioToNotes(file){
+  const ab=await new OfflineAudioContext(1,1,44100).decodeAudioData(await file.arrayBuffer());
+  const ch=ab.numberOfChannels,sps=60/P.bpm/4,DS=4,fs=ab.sampleRate/DS;
+  const n=Math.min(Math.floor(ab.length/DS),Math.floor(STEPS*sps*fs)),x=new Float32Array(n);
+  for(let c=0;c<ch;c++){const d=ab.getChannelData(c);for(let i=0;i<n;i++){let a=0;for(let k=0;k<DS;k++)a+=d[i*DS+k];x[i]+=a/DS/ch}}
+  let pk=0;for(let i=0;i<n;i++)pk=Math.max(pk,Math.abs(x[i]));
+  if(pk<1e-4)throw new Error('音訊幾乎無聲');
+  const hop=Math.round(fs*.01),W=Math.round(fs*.03),tMin=Math.floor(fs/1100),tMax=Math.ceil(fs/100),d=new Float32Array(tMax+2),f0=[];
+  for(let st=0;st+W+tMax+1<n;st+=hop){
+    let e=0;for(let j=0;j<W;j++)e+=x[st+j]*x[st+j];
+    if(Math.sqrt(e/W)<pk*.03){f0.push(null);continue}
+    let run=0;d[0]=1;
+    for(let t=1;t<=tMax;t++){let s=0;for(let j=0;j<W;j++){const df=x[st+j]-x[st+j+t];s+=df*df}run+=s;d[t]=run?s*t/run:1}
+    let tau=0;
+    for(let t=tMin;t<tMax;t++)if(d[t]<.15){while(t+1<tMax&&d[t+1]<d[t])t++;tau=t;break}
+    if(!tau){f0.push(null);continue}
+    const a=d[tau-1],b=d[tau],c=d[tau+1],den=a-2*b+c;
+    f0.push(69+12*Math.log2(fs/(den?tau+(a-c)/(2*den):tau)/440));
+  }
+  const med=a=>{a=[...a].sort((p,q)=>p-q);return a[a.length>>1]};
+  const sm=f0.map((v,i)=>{if(v==null)return null;const w=[];for(let k=i-2;k<=i+2;k++)if(f0[k]!=null)w.push(f0[k]);return w.length>=3?med(w):null});
+  const fr=sm.filter(v=>v!=null).map(v=>v-Math.round(v));
+  if(fr.length<5)throw new Error('偵測不到明確的單旋律音高（全混音或雜訊較多的檔案效果不佳）');
+  const off=med(fr),runs=[];let r=null;
+  sm.forEach((v,i)=>{if(v==null)return;v-=off;if(r&&i-r.last<=4&&Math.abs(v-r.m)<.7){r.last=i;r.n++;return}r={m:Math.round(v),first:i,last:i,n:1};runs.push(r)});
+  const q=+$('aq').value,res=[];let prev=0,cut=false;
+  for(const u of runs){
+    if(u.n<5)continue;
+    let s=Math.round((u.first*hop+W/2-hop/2)/fs/sps/q)*q,e=Math.round((u.last*hop+W/2+hop/2)/fs/sps/q)*q;
+    s=Math.max(s,prev);if(e<=s)e=s+q;
+    if(s>=STEPS){cut=true;break}
+    e=Math.min(e,STEPS);let m=u.m;while(m<TOP-NR+1)m+=12;while(m>TOP)m-=12;
+    res.push({id:++uid,s,m,l:e-s,lyric:'a'});prev=e;
+  }
+  if(!res.length)throw new Error('沒有足夠長的音符');
+  stop();notes=res;sel=null;lysDirty=false;render();
+  $('roll').scrollLeft=0;$('roll').scrollTop=Math.max(0,(TOP-Math.max(...res.map(z=>z.m))-3)*RH);
+  msg('已偵測 '+res.length+' 個音符'+(cut?'（超過卷軸長度的部分已截斷）':'')+'；可按「匯出 JSON」儲存');
+}
+$('aud').onchange=async e=>{
+  const f=e.target.files[0];e.target.value='';if(!f)return;
+  msg('解碼與分析中…（最多處理前 '+Math.round(STEPS*60/P.bpm/4)+' 秒）');await new Promise(r=>setTimeout(r,40));
+  try{await audioToNotes(f)}catch(err){msg('音訊轉換失敗：'+(err.message||'無法解碼此檔案'))}
 };
 load(DEMOS.frog);
 </script>
