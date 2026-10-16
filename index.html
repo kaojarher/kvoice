@@ -578,41 +578,125 @@ const NN=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const nm=m=>NN[m%12]+(Math.floor(m/12)-1);
 const KANA="あa いi うu えe おo かka きki くku けke こko さsa しshi すsu せse そso たta ちchi つtsu てte とto なna にni ぬnu ねne のno はha ひhi ふfu へhe ほho まma みmi むmu めme もmo やya ゆyu よyo らra りri るru れre ろro わwa をo んn";
 const KM={};KANA.split(' ').forEach(s=>KM[s[0]]=s.slice(1));
-// 母音共振峰 F1/F2/F3 (Hz)，近似成年男聲典型值（Peterson & Barney 1952 一類的母音研究）
-const VF={a:[800,1200,2600],i:[300,2300,3000],u:[350,1400,2300],e:[500,1900,2600],o:[500,900,2500],n:[280,1500,2500]};
-const NEU=[500,1500,2500];
-// 子音：[雜訊中心頻率, 持續秒數, 強度]；未列出者視為有聲子音（僅做共振峰滑動）
-const CT={k:[2500,.05,.4],t:[4500,.04,.4],p:[1500,.04,.35],s:[6500,.1,.5],sh:[3500,.11,.5],ch:[3500,.07,.5],ts:[5500,.07,.5],h:[1800,.08,.3],f:[1200,.08,.3]};
+
 const P={fs:1.17,bpm:100,vol:1.6,lp:5000,vib:15};
 
-/* ---------- 聲音引擎：鋸齒波聲源 → 三組並聯帶通濾波(F1~F3) → 包絡 ---------- */
+
+/* ---------- 聲音引擎：鋸齒波聲源 → 四組並聯帶通濾波(F1~F4) → 包絡 ---------- */
 let ready=false;
+
+// 元音共振峰 [F1,F2,F3,F4]（Hz；成年男聲基準，實際會乘以 P.fs）
+const VF = {
+  a: [730, 1090, 2440, 3400],
+  i: [270, 2290, 3010, 3500],
+  u: [300, 1300, 2200, 3300],   // 中日語 u 的 F2 比英語高
+  e: [530, 1840, 2480, 3400],
+  o: [570,  840, 2410, 3300],
+  n: [280, 1100, 2300, 3300],
+  N: [280, 1000, 2200, 3300],
+  m: [280, 1200, 2300, 3300],
+};
+// 中性共振峰（輔音起點預設）
+const NEU = [500, 1500, 2500, 3500];
+
+// 輔音：[雜訊中心頻率(Hz), 持續秒數, 強度, 類型, 起始共振峰]
+// 類型：'fric' 擦音、'stop' 塞音、'aff' 塞擦音、'voiced' 濁音(只做共振峰滑動)
+const CT = {
+  // 清擦音
+  f:  [1200, 0.08, 0.30, 'fric', [400, 1200, 2200, 3000]],
+  s:  [6500, 0.10, 0.45, 'fric', [300, 1800, 2600, 3200]],
+  sh: [3500, 0.11, 0.45, 'fric', [300, 1900, 2600, 3200]],
+  x:  [3500, 0.10, 0.40, 'fric', [300, 1900, 2600, 3200]],
+  h:  [1800, 0.08, 0.25, 'fric', [500, 1500, 2500, 3500]],
+  // 清塞音
+  p:  [1500, 0.04, 0.40, 'stop', [300,  900, 2200, 3000]],
+  t:  [4500, 0.04, 0.40, 'stop', [300, 1800, 2600, 3200]],
+  k:  [2500, 0.05, 0.40, 'stop', [300, 1200, 2200, 3000]],
+  // 塞擦音
+  ch: [3500, 0.07, 0.45, 'aff',  [300, 1900, 2600, 3200]],
+  ts: [5500, 0.07, 0.45, 'aff',  [300, 1800, 2600, 3200]],
+  j:  [3500, 0.06, 0.35, 'aff',  [300, 1900, 2600, 3200]],
+  // 濁擦音
+  v:  [1200, 0.06, 0.15, 'fric', [400, 1200, 2200, 3000]],
+  z:  [5500, 0.07, 0.25, 'fric', [300, 1800, 2600, 3200]],
+  // 濁塞音（共振峰快速滑動）
+  b:  [ 800, 0.03, 0.15, 'stop', [250,  800, 2100, 2900]],
+  d:  [3000, 0.03, 0.15, 'stop', [250, 1600, 2500, 3100]],
+  g:  [1800, 0.03, 0.15, 'stop', [250, 1200, 2100, 2900]],
+  // 近音
+  r:  [1300, 0.04, 0.10, 'voiced', [350, 1200, 2300, 3200]],
+  l:  [1000, 0.04, 0.08, 'voiced', [350, 1000, 2400, 3300]],
+  w:  [ 800, 0.04, 0.10, 'voiced', [300,  700, 2200, 3200]],
+  y:  [2200, 0.04, 0.10, 'voiced', [300, 2000, 2800, 3300]],
+};
+
 function mkVoice(){
-const master=new Tone.Gain(P.vol),lim=new Tone.Limiter(-3);master.connect(lim);lim.toDestination();
-const amp=new Tone.Gain(0).connect(master);
-const osc=new Tone.Oscillator(220,'sawtooth');
-const lp=new Tone.Filter(P.lp,'lowpass');osc.connect(lp);
-const fs=[0,1,2].map(i=>{const f=new Tone.Filter({type:'bandpass',frequency:800,Q:[5,9,12][i]});const g=new Tone.Gain([1.2,.8,.5][i]);lp.connect(f);f.connect(g);g.connect(amp);return f});
-const lfo=new Tone.LFO({frequency:5.5,min:-P.vib,max:P.vib}).connect(osc.detune);
-const nz=new Tone.Noise('white'),nf=new Tone.Filter(3000,'bandpass'),ng=new Tone.Gain(0);nz.chain(nf,ng,master);
+  const master=new Tone.Gain(P.vol),lim=new Tone.Limiter(-3);master.connect(lim);lim.toDestination();
+  const amp=new Tone.Gain(0).connect(master);
+  const osc=new Tone.Oscillator(220,'sawtooth');
+  const lp=new Tone.Filter(P.lp,'lowpass');osc.connect(lp);
+  // 四組並聯帶通共振峰
+  const filtGain=[1.0,0.8,0.5,0.25];
+  const filtQ   =[5,7,9,11];
+  const fs=[0,1,2,3].map(i=>{
+    const f=new Tone.Filter({type:'bandpass',frequency:NEU[i],Q:filtQ[i]});
+    const g=new Tone.Gain(filtGain[i]);
+    lp.connect(f);f.connect(g);g.connect(amp);return f;
+  });
+  const lfo=new Tone.LFO({frequency:5.5,min:-P.vib,max:P.vib}).connect(osc.detune);
+  const nz=new Tone.Noise('white'),nf=new Tone.Filter(3000,'bandpass'),ng=new Tone.Gain(0);
+  nz.chain(nf,ng,master);
 
+  function parse(l){
+    l=[...(l||'a').toLowerCase()].map(ch=>{const c=ch.charCodeAt(0);if(c>=0x30A1&&c<=0x30F6)ch=String.fromCharCode(c-0x60);return KM[ch]||ch}).join('');
+    if(l==='n'||l==='nn')return{c:'',v:'n'};
+    if(l==='ng')return{c:'',v:'N'};
+    const m=l.match(/^([a-z]*?)([aiueo])$/);return m?{c:m[1],v:m[2]}:{c:'',v:'a'};
+  }
 
-function parse(l){
-  l=[...(l||'a').toLowerCase()].map(ch=>{const c=ch.charCodeAt(0);if(c>=0x30A1&&c<=0x30F6)ch=String.fromCharCode(c-0x60);return KM[ch]||ch}).join('');
-  if(l==='n'||l==='nn')return{c:'',v:'n'};
-  const m=l.match(/^([a-z]*?)([aiueo])$/);return m?{c:m[1],v:m[2]}:{c:'',v:'a'};
-}
-function sing(n,t,d){
-  const {c,v}=parse(n.lyric),ck=CT[c]?c:c[0],ct=c?(CT[ck]||[0,.06,0]):[0,0,0],cd=ct[1];
-  const hz=Tone.Frequency(n.m,'midi').toFrequency();
-  osc.frequency.cancelScheduledValues(t);osc.frequency.setTargetAtTime(hz,t,.02);
-  VF[v].forEach((f,i)=>{const p=fs[i].frequency;p.cancelScheduledValues(t);if(c)p.setValueAtTime(NEU[i]*P.fs,t);p.setTargetAtTime(f*P.fs,t+(c?cd*.6:0),.03)});
-  amp.gain.cancelScheduledValues(t);
-  amp.gain.setTargetAtTime(v==='n'?.6:1,t+cd,.02);
-  amp.gain.setTargetAtTime(0,t+Math.max(d*.94,cd+.05),.04);
-  if(ct[0]){nf.frequency.setValueAtTime(ct[0],t);ng.gain.cancelScheduledValues(t);ng.gain.setValueAtTime(ct[2]*3,t);ng.gain.setTargetAtTime(0,t+cd*.7,.01)}
-}
-return{master,lp,lfo,amp,sing,start:()=>{osc.start();nz.start();lfo.start()}};
+  function sing(n,t,d){
+    const {c,v}=parse(n.lyric);
+    const cinfo=c?(CT[c]||CT[c[0]]||null):null;
+    // 輔音時長不可超過音符 45%，避免短音符吃不到母音
+    const cd=cinfo?Math.min(cinfo[1],d*0.45):0;
+    const hz=Tone.Frequency(n.m,'midi').toFrequency();
+
+    // 基頻
+    osc.frequency.cancelScheduledValues(t);
+    osc.frequency.setValueAtTime(hz,t);
+
+    // 共振峰軌跡：輔音起點 → 元音目標（乘上 P.fs 做性別／體型縮放）
+    const vf=VF[v]||VF.a;
+    const startF=cinfo?cinfo[4]:NEU;
+    fs.forEach((filt,i)=>{
+      const p=filt.frequency;
+      p.cancelScheduledValues(t);
+      const s=startF[i]*P.fs, e=vf[i]*P.fs;
+      p.setValueAtTime(s,t);
+      if(Math.abs(s-e)>1) p.linearRampToValueAtTime(e,t+cd+0.025);
+      else p.setValueAtTime(e,t);
+    });
+
+    // 增益包絡
+    const g=amp.gain;
+    const attack=cinfo?cd+0.02:0.025;
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(0.0001,t);
+    g.linearRampToValueAtTime(v==='n'||v==='N'||v==='m'?0.65:1.0,t+attack);
+    const relStart=Math.max(t+d*0.85,t+attack+0.02);
+    g.setTargetAtTime(0.0001,relStart,0.04);
+
+    // 輔音雜訊（擦音、塞音、塞擦音）
+    if(cinfo&&(cinfo[3]==='fric'||cinfo[3]==='stop'||cinfo[3]==='aff')){
+      nf.frequency.cancelScheduledValues(t);
+      nf.frequency.setValueAtTime(cinfo[0],t);
+      ng.gain.cancelScheduledValues(t);
+      ng.gain.setValueAtTime(cinfo[2],t);
+      const nd=cinfo[3]==='stop'?Math.min(cd,0.025):cd;
+      ng.gain.exponentialRampToValueAtTime(0.001,t+nd);
+    }
+  }
+  return{master,lp,lfo,amp,sing,start:()=>{osc.start();nz.start();lfo.start()}};
 }
 const V=mkVoice();
 async function go(){if(!ready){await Tone.start();V.start();ready=true}}
